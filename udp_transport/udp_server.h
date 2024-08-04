@@ -7,6 +7,8 @@
 #include <memory>
 #include <string>
 
+#include <glog/logging.h>
+
 #include "data_segment.h"
 #include "packet_statistics.h"
 #include "sliding_window.h"
