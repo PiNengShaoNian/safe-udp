@@ -43,4 +43,18 @@ bool UdpServer::OpenFile(const std::string &file_name) {
     return true;
   }
 }
+
+char *UdpServer::GetRequest(int server_sockfd) {
+  char *buffer =
+      reinterpret_cast<char *>(calloc(MAX_PACKET_SIZE, sizeof(char)));
+  struct sockaddr_in client_addr;
+  socklen_t addr_size;
+  memset(buffer, 0, MAX_PACKET_SIZE);
+  addr_size = sizeof(client_addr);
+  recvfrom(server_sockfd, buffer, MAX_PACKET_SIZE, 0,
+           (struct sockaddr *)&client_addr, &addr_size);
+  LOG(INFO) << "***Request received is: " << buffer;
+  cli_address_ = client_addr;
+  return buffer;
+}
 }  // namespace safe_udp
