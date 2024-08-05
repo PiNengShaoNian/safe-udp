@@ -120,6 +120,79 @@ void UdpServer::send() {
   LOG(INFO) << "========================================";
 }
 
+void UdpServer::send_packet(int seq_number, int start_byte) {
+  bool lastPacket = false;
+  int dataLength = 0;
+  if (file_length_ <= start_byte + MAX_DATA_SIZE) {
+    LOG(INFO) << "Last packet to be sent !!!";
+    dataLength = file_length_ - start_byte;
+    lastPacket = true;
+  } else {
+    dataLength = MAX_DATA_SIZE;
+  }
+
+  struct timeval time;
+
+  gettimeofday(&time, NULL);
+
+  if (sliding_window_->last_packet_sent_ != -1 &&
+      start_byte <
+          sliding_window_
+              ->sliding_window_buffers_[sliding_window_->last_acked_packet_]
+              .first_byte_) {
+    for (int i = sliding_window_->last_acked_packet_ + 1;
+         i < sliding_window_->last_packet_sent_; i++) {
+      if (sliding_window_->sliding_window_buffers_[i].first_byte_ ==
+          start_byte) {
+        sliding_window_->sliding_window_buffers_[i].time_sent_ = time;
+        break;
+      }
+    }
+  } else {
+    SlideWinBuffer slidingWindowBuffer;
+    slidingWindowBuffer.first_byte_ = start_byte;
+    slidingWindowBuffer.data_length_ = dataLength;
+    slidingWindowBuffer.seq_num_ = initial_seq_number_ + start_byte;
+    struct timeval time;
+    gettimeofday(&time, NULL);
+    slidingWindowBuffer.time_sent_ = time;
+    sliding_window_->last_acked_packet_ =
+        sliding_window_->AddToBuffer(slidingWindowBuffer);
+  }
+  read_file_and_send(lastPacket, start_byte, start_byte + dataLength);
+}
+
+void UdpServer::read_file_and_send(bool fin_flag, int start_byte,
+                                   int end_byte) {
+  int dataLength = end_byte - start_byte;
+  if (file_length_ - start_byte < dataLength) {
+    dataLength = file_length_ - start_byte;
+    fin_flag = true;
+  }
+  char *fileData = reinterpret_cast<char *>(calloc(dataLength, sizeof(char)));
+  if (!file_.is_open()) {
+    LOG(ERROR) << "File open failed !!!";
+    free(fileData);
+    return;
+  }
+  file_.seekg(start_byte);
+  file_.read(fileData, dataLength);
+
+  DataSegment *data_segment = new DataSegment();
+  data_segment->seq_number_ = start_byte + initial_seq_number_;
+  data_segment->ack_number_ = 0;
+  data_segment->ack_flag_ = false;
+  data_segment->fin_flag_ = fin_flag;
+  data_segment->length_ = dataLength;
+  data_segment->data_ = fileData;
+
+  send_data_segment(data_segment);
+  LOG(INFO) << "Packet sent: seq number: " << data_segment->seq_number_;
+
+  free(fileData);
+  delete data_segment;
+}
+
 bool UdpServer::OpenFile(const std::string &file_name) {
   LOG(INFO) << "Opening the file" << file_name;
 
@@ -145,5 +218,12 @@ char *UdpServer::GetRequest(int server_sockfd) {
   LOG(INFO) << "***Request received is: " << buffer;
   cli_address_ = client_addr;
   return buffer;
+}
+
+void UdpServer::send_data_segment(DataSegment *data_segment) {
+  char *datagramChars = data_segment->SerializeToCharArray();
+  sendto(sockfd_, datagramChars, MAX_PACKET_SIZE, 0,
+         (struct sockaddr *)&cli_address_, sizeof(cli_address_));
+  free(datagramChars);
 }
 }  // namespace safe_udp
