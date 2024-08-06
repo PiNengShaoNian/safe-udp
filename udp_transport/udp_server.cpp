@@ -4,6 +4,26 @@
 #include <math.h>
 
 namespace safe_udp {
+UdpServer::UdpServer() {
+  sliding_window_ = std::make_unique<SlidingWindow>();
+  packet_statistics_ = std::make_unique<PacketStatistics>();
+
+  sockfd_ = 0;
+  smoothed_rtt_ = 20000;
+  smoothed_timeout_ = 30000;
+  dev_rtt_ = 0;
+
+  initial_seq_number_ = 67;
+  start_byte_ = 0;
+
+  ssthresh_ = 128;
+  cwnd_ = 1;
+
+  is_slow_start_ = true;
+  is_cong_avd_ = false;
+  is_fast_recovery_ = false;
+}
+
 int UdpServer::StartServer(int port) {
   int sfd;
   struct sockaddr_in server_addr;
@@ -123,8 +143,45 @@ void UdpServer::send() {
           }
           break;
         }
+      } else {
+        // 拥塞发生--超时重传
+        LOG(INFO) << "Timeout occurred SELECT::" << smoothed_timeout_;
+        ssthresh_ = cwnd_ / 2;
+        if (ssthresh_ < 1) {
+          ssthresh_ = 1;
+        }
+        cwnd_ = 1;
+
+        if (is_fast_recovery_) {
+          is_fast_recovery_ = false;
+        }
+        is_slow_start_ = true;
+        is_cong_avd_ = false;
+
+        // retransmit all unacked segments
+        for (int i = sliding_window_->last_acked_packet_ + 1;
+             i <= sliding_window_->last_packet_sent_; i++) {
+          int retransmit_start_byte = 0;
+          if (sliding_window_->last_acked_packet_ != -1) {
+            retransmit_start_byte =
+                sliding_window_
+                    ->sliding_window_buffers_[sliding_window_
+                                                  ->last_acked_packet_]
+                    .first_byte_ +
+                MAX_DATA_SIZE;
+          }
+          LOG(INFO) << "Timeout Retransmit seq number"
+                    << retransmit_start_byte + initial_seq_number_;
+          retransmit_segment(retransmit_start_byte);
+          packet_statistics_->retransmit_count_++;
+          LOG(INFO) << "Timeout: retransmission at " << retransmit_start_byte;
+        }
+        break;
       }
     }
+    LOG(INFO) << "SELECT END !!!";
+    LOG(INFO) << "current byte ::" << start_byte_ << " file_length_ "
+              << file_length_;
   }
 
   gettimeofday(&process_end_time, NULL);
@@ -174,7 +231,7 @@ void UdpServer::send_packet(int seq_number, int start_byte) {
   if (sliding_window_->last_packet_sent_ != -1 &&
       start_byte <
           sliding_window_
-              ->sliding_window_buffers_[sliding_window_->last_acked_packet_]
+              ->sliding_window_buffers_[sliding_window_->last_packet_sent_]
               .first_byte_) {
     for (int i = sliding_window_->last_acked_packet_ + 1;
          i < sliding_window_->last_packet_sent_; i++) {
@@ -192,7 +249,7 @@ void UdpServer::send_packet(int seq_number, int start_byte) {
     struct timeval time;
     gettimeofday(&time, NULL);
     slidingWindowBuffer.time_sent_ = time;
-    sliding_window_->last_acked_packet_ =
+    sliding_window_->last_packet_sent_ =
         sliding_window_->AddToBuffer(slidingWindowBuffer);
   }
   read_file_and_send(lastPacket, start_byte, start_byte + dataLength);
@@ -230,38 +287,40 @@ void UdpServer::wait_for_ack() {
         }
         ssthresh_ = cwnd_;
         is_fast_recovery_ = true;
-      } else if (ack_segment.ack_number_ > sliding_window_->send_base_) {
-        if (is_fast_recovery_) {
-          cwnd_++;
-          is_fast_recovery_ = true;
-          is_cong_avd_ = true;
-          is_slow_start_ = false;
-        }
+      }
+    } else if (ack_segment.ack_number_ > sliding_window_->send_base_) {
+      if (is_fast_recovery_) {
+        cwnd_++;
+        is_fast_recovery_ = false;
+        is_cong_avd_ = true;
+        is_slow_start_ = false;
+      }
 
-        sliding_window_->dup_ack_ = 0;
-        sliding_window_->send_base_ = ack_segment.ack_number_;
-        if (sliding_window_->last_acked_packet_ == -1) {
-          sliding_window_->last_acked_packet_ = 0;
-          last_packet_acked_buffer = sliding_window_->sliding_window_buffers_
-                                         [sliding_window_->last_acked_packet_];
-        }
+      sliding_window_->dup_ack_ = 0;
+      sliding_window_->send_base_ = ack_segment.ack_number_;
+      if (sliding_window_->last_acked_packet_ == -1) {
+        sliding_window_->last_acked_packet_ = 0;
+        last_packet_acked_buffer =
+            sliding_window_
+                ->sliding_window_buffers_[sliding_window_->last_acked_packet_];
+      }
+      ack_number = last_packet_acked_buffer.seq_num_ +
+                   last_packet_acked_buffer.data_length_;
+
+      while (ack_number < ack_segment.ack_number_) {
+        sliding_window_->last_acked_packet_++;
+        last_packet_acked_buffer =
+            sliding_window_
+                ->sliding_window_buffers_[sliding_window_->last_acked_packet_];
         ack_number = last_packet_acked_buffer.seq_num_ +
                      last_packet_acked_buffer.data_length_;
-
-        while (ack_number < ack_segment.ack_number_) {
-          sliding_window_->last_acked_packet_++;
-          last_packet_acked_buffer = sliding_window_->sliding_window_buffers_
-                                         [sliding_window_->last_acked_packet_];
-          ack_number = last_packet_acked_buffer.seq_num_ +
-                       last_packet_acked_buffer.data_length_;
-        }
-
-        struct timeval startTime = last_packet_acked_buffer.time_sent_;
-        struct timeval endTime;
-        gettimeofday(&endTime, NULL);
-
-        calculate_rtt_and_time(startTime, endTime);
       }
+
+      struct timeval startTime = last_packet_acked_buffer.time_sent_;
+      struct timeval endTime;
+      gettimeofday(&endTime, NULL);
+
+      calculate_rtt_and_time(startTime, endTime);
     }
   }
 }
