@@ -325,6 +325,24 @@ void UdpServer::wait_for_ack() {
   }
 }
 
+void UdpServer::calculate_rtt_and_time(struct timeval start_time,
+                                       struct timeval end_time) {
+  if (start_time.tv_sec == 0 && start_time.tv_usec == 0) {
+    return;
+  }
+  long sample_rtt = (end_time.tv_sec * 1000000 + end_time.tv_usec) -
+                    (start_time.tv_sec * 1000000 + start_time.tv_usec);
+
+  smoothed_rtt_ = smoothed_rtt_ + 0.125 * (sample_rtt - smoothed_rtt_);
+
+  dev_rtt_ = 0.75 * dev_rtt_ + 0.25 * (abs(smoothed_rtt_ - sample_rtt));
+  smoothed_timeout_ = smoothed_rtt_ + 4 * dev_rtt_;
+
+  if (smoothed_timeout_ > 1000000) {
+    smoothed_timeout_ = rand() % 30000;
+  }
+}
+
 void UdpServer::retransmit_segment(int index_number) {
   for (int i = sliding_window_->last_acked_packet_ + 1;
        i < sliding_window_->last_packet_sent_; i++) {
