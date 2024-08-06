@@ -33,6 +33,7 @@ class UdpServer {
   int start_byte_;
   bool is_slow_start_;
   bool is_cong_avd_;
+  bool is_fast_recovery_;
   int StartServer(int port);
 
  private:
